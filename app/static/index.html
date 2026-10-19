@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#f2eee3" />
+    <meta
+      name="description"
+      content="Optiway 多点路线优化 demo：输入多个地点，自动规划更省时的拜访顺序。"
+    />
+    <title>Optiway · 多点路线优化</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <section class="map-pane" aria-label="路线地图">
+        <div id="map" class="map"></div>
+        <div class="map-shade" aria-hidden="true"></div>
+
+        <header class="topbar">
+          <a class="brand" href="/" aria-label="Optiway 首页">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 40 40">
+                <path
+                  d="M10 30c8 0 4-20 20-20"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="3.5"
+                  stroke-linecap="round"
+                  stroke-dasharray="1 7"
+                />
+                <circle cx="10" cy="30" r="5" fill="currentColor" />
+                <circle cx="30" cy="10" r="5" fill="currentColor" />
+              </svg>
+            </span>
+            <span class="brand-copy">
+              <strong>Optiway</strong>
+              <small>多点路线优化</small>
+            </span>
+          </a>
+          <div class="topbar-right">
+            <span id="sourceBadge" class="source-badge">检测数据源…</span>
+            <button
+              id="locateBtn"
+              class="icon-button"
+              type="button"
+              title="定位到我"
+              aria-label="定位到我"
+            >
+              ◎
+            </button>
+          </div>
+        </header>
+
+        <div id="pickBanner" class="pick-banner hidden">
+          <span>点击地图选择地点</span>
+          <button id="cancelPickBtn" class="pick-cancel" type="button">取消</button>
+        </div>
+
+        <div id="mapStatus" class="map-status hidden" role="status"></div>
+
+        <div class="map-legend">
+          <span><i class="legend-dot start"></i>起点</span>
+          <span><i class="legend-dot stop"></i>途经</span>
+          <span><i class="legend-dot end"></i>终点</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-inner">
+          <header class="panel-head">
+            <div class="head-row">
+              <p class="eyebrow">MULTI-STOP ROUTE PLANNER</p>
+              <button id="sampleBtn" class="text-button" type="button">载入示例</button>
+            </div>
+            <h1>把多点行程<br /><em>排成一条顺路</em></h1>
+            <p class="intro">
+              输入起点、终点与途经点，自动计算更省时的拜访顺序。适合地推、巡检、客户拜访与接送安排。
+            </p>
+          </header>
+
+          <form id="routeForm" class="route-form" novalidate>
+            <div class="stops-card">
+              <div class="stop-row" id="originRow">
+                <span class="stop-dot start" aria-hidden="true">起</span>
+                <button
+                  type="button"
+                  class="stop-main"
+                  id="originBtn"
+                  aria-label="修改起点"
+                >
+                  <span class="stop-label">起点</span>
+                  <span class="stop-name" id="originName">选择起点</span>
+                </button>
+                <button
+                  type="button"
+                  class="row-action"
+                  data-edit="origin"
+                  aria-label="编辑起点"
+                >
+                  ›
+                </button>
+              </div>
+
+              <div id="intermediateList" class="intermediate-list"></div>
+
+              <button type="button" id="addStopBtn" class="add-stop">
+                <span class="add-icon" aria-hidden="true">+</span>
+                添加途经点
+                <span id="stopCount" class="count">0 / 10</span>
+              </button>
+
+              <div class="stop-row" id="destinationRow">
+                <span class="stop-dot end" aria-hidden="true">终</span>
+                <button
+                  type="button"
+                  class="stop-main"
+                  id="destinationBtn"
+                  aria-label="修改终点"
+                >
+                  <span class="stop-label">终点</span>
+                  <span class="stop-name" id="destinationName">选择终点</span>
+                </button>
+                <button
+                  type="button"
+                  class="row-action"
+                  data-edit="destination"
+                  aria-label="编辑终点"
+                >
+                  ›
+                </button>
+              </div>
+            </div>
+
+            <div class="options-card">
+              <div class="option-row">
+                <span class="option-label">出行方式</span>
+                <div class="segmented" id="travelMode" role="group" aria-label="出行方式">
+                  <button type="button" data-mode="DRIVE" class="active" aria-pressed="true">
+                    驾车
+                  </button>
+                  <button type="button" data-mode="WALK" aria-pressed="false">步行</button>
+                  <button type="button" data-mode="BICYCLE" aria-pressed="false">骑行</button>
+                </div>
+              </div>
+
+              <div class="option-row">
+                <label class="switch">
+                  <input id="optimizeToggle" type="checkbox" checked />
+                  <span class="switch-track" aria-hidden="true"></span>
+                  <span class="switch-copy">
+                    <strong>自动优化顺序</strong>
+                    <small>起点和终点固定，途经点自动排序</small>
+                  </span>
+                </label>
+              </div>
+
+              <div class="option-row">
+                <label class="option-label" for="providerSelect">数据源</label>
+                <select id="providerSelect" class="provider-select">
+                  <option value="auto">自动选择</option>
+                  <option value="google">Google Routes</option>
+                  <option value="osrm">OSRM 真实道路</option>
+                  <option value="local">本地模拟</option>
+                </select>
+              </div>
+            </div>
+
+            <button id="optimizeBtn" class="primary-button" type="submit">
+              <span class="button-label">开始优化行程</span>
+              <span class="button-meta" id="buttonMeta">0 个途经点</span>
+              <span class="spinner hidden" aria-hidden="true"></span>
+            </button>
+            <p class="fine-print" id="providerHint">
+              自动模式优先使用 Google Routes；未配置密钥时使用 OSRM 公共演示服务。
+            </p>
+          </form>
+
+          <section id="resultSection" class="result hidden" aria-live="polite">
+            <div class="result-heading">
+              <div>
+                <p class="eyebrow">OPTIMIZED ITINERARY</p>
+                <h2 id="resultTitle">推荐行程</h2>
+              </div>
+              <span id="resultProvider" class="provider-chip">OSRM</span>
+            </div>
+
+            <div class="stats-grid">
+              <div class="stat">
+                <span>总里程</span>
+                <strong id="totalDistance">—</strong>
+              </div>
+              <div class="stat">
+                <span>预计耗时</span>
+                <strong id="totalDuration">—</strong>
+              </div>
+              <div class="stat">
+                <span>地点数量</span>
+                <strong id="totalStops">—</strong>
+              </div>
+            </div>
+
+            <p id="resultNote" class="result-note"></p>
+            <p id="fallbackNote" class="fallback-note hidden"></p>
+            <ol id="resultStops" class="result-stops"></ol>
+
+            <div class="result-actions">
+              <button type="button" id="rerunBtn" class="secondary-button">重新计算</button>
+              <button type="button" id="resetBtn" class="text-button">清空结果</button>
+            </div>
+          </section>
+
+          <section id="emptyState" class="empty-state">
+            <div class="empty-mark" aria-hidden="true">↗</div>
+            <p>
+              路线还未计算。点击「开始优化行程」，查看优化后的拜访顺序、总里程与每段耗时。
+            </p>
+          </section>
+
+          <footer class="panel-foot">
+            <span>Demo · 最多 10 个途经点</span>
+            <span>底图 © OpenStreetMap</span>
+          </footer>
+        </div>
+      </section>
+    </div>
+
+    <div id="pickerOverlay" class="overlay hidden" aria-hidden="true">
+      <div
+        class="picker-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pickerTitle"
+      >
+        <div class="picker-head">
+          <div>
+            <p class="eyebrow">ADD A STOP</p>
+            <h2 id="pickerTitle">选择地点</h2>
+          </div>
+          <button id="pickerClose" class="icon-button" type="button" aria-label="关闭">
+            ×
+          </button>
+        </div>
+
+        <div id="cityTabs" class="city-tabs" role="tablist" aria-label="城市"></div>
+        <div id="placeGrid" class="place-grid"></div>
+
+        <div class="picker-actions">
+          <button id="mapPickBtn" class="secondary-button" type="button">
+            在地图上选点
+          </button>
+          <button id="geolocateBtn" class="secondary-button" type="button">
+            使用我的位置
+          </button>
+        </div>
+
+        <details class="coord-details">
+          <summary>手动输入坐标</summary>
+          <form id="coordForm" class="coord-form">
+            <label>
+              地点名称
+              <input
+                id="coordName"
+                type="text"
+                maxlength="40"
+                placeholder="例如：客户 A 公司"
+              />
+            </label>
+            <div class="coord-row">
+              <label>
+                纬度
+                <input id="coordLat" type="text" inputmode="decimal" placeholder="39.9087" />
+              </label>
+              <label>
+                经度
+                <input id="coordLng" type="text" inputmode="decimal" placeholder="116.3975" />
+              </label>
+            </div>
+            <button type="submit" class="secondary-button solid">添加地点</button>
+          </form>
+        </details>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

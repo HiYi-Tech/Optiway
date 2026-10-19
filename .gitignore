@@ -1,8 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+
+# Local configuration and FastAPI Cloud link
+.env
+.fastapicloud/
+
+# Editor / OS
+.DS_Store
 .vscode/*
-!.vscode/extensions.json
-node_modules/
-backend/app/frontend/
-/test-results/
-/playwright-report/
-/blob-report/
-/playwright/.cache/

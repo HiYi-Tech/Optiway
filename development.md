@@ -1,138 +1,126 @@
-# FastAPI Project - Development
+# 本地开发
 
-## Local Development
+## 环境
 
-For local development, run PostgreSQL and Mailpit with Docker Compose, and run the FastAPI and Vite development servers locally.
-
-Start the supporting services:
-
-```bash
-docker compose up -d db mailpit
-```
-
-Then, from the `backend` directory, install the dependencies and prepare the database:
+- Python 3.14（由 `.python-version` 指定，`uv` 会自动安装）
+- [uv](https://docs.astral.sh/uv/)
 
 ```bash
 uv sync
-uv run bash scripts/prestart.sh
-```
-
-Start the FastAPI development server:
-
-```bash
 uv run fastapi dev
 ```
 
-In another terminal, from the project root, install the frontend dependencies and start the Vite development server:
+- H5：<http://127.0.0.1:8000>
+- API 文档：<http://127.0.0.1:8000/docs>
+- 健康检查：<http://127.0.0.1:8000/api/health>
 
-```bash
-bun install
-bun run dev
+`fastapi dev` 会自动读取 `pyproject.toml` 中的入口：
+
+```toml
+[tool.fastapi]
+entrypoint = "app.main:app"
 ```
 
-Now you can open these URLs:
+## 配置
 
-Frontend development server: <http://localhost:5173>
-
-Backend API: <http://localhost:8000>
-
-Automatic interactive API documentation with Swagger UI: <http://localhost:8000/docs>
-
-Mailpit: <http://localhost:8025>
-
-The frontend development server uses the backend at `http://localhost:8000`, as configured in `frontend/.env`.
-
-### Frontend Served by FastAPI
-
-Build the frontend from the `frontend` directory:
+复制 `.env.example` 为 `.env` 后按需修改：
 
 ```bash
-bun run build
+cp .env.example .env
 ```
 
-The build is written to `backend/app/frontend` and served by FastAPI at <http://localhost:8000>. Rebuild the frontend after making frontend changes.
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `ROUTE_PROVIDER` | `auto` | `auto` / `google` / `osrm` / `local` |
+| `GOOGLE_MAPS_API_KEY` | 空 | 配置后 `auto` 优先使用 Google Routes |
+| `OSRM_BASE_URL` | `https://router.project-osrm.org` | OSRM 服务地址 |
+| `HTTP_TIMEOUT_SECONDS` | `15` | 外部请求超时 |
+| `MAP_TILE_URL` | OpenStreetMap Germany | Leaflet 瓦片 URL 模板 |
+| `MAP_TILE_ATTRIBUTION` | OSM 署名 | 地图署名弹层内容 |
+| `MAP_TILE_MAX_ZOOM` | `19` | 底图最大缩放级别 |
 
-## Full Stack with Docker Compose
+`.env` 不会被打包到 FastAPI Cloud（见 `.fastapicloudignore`）。
 
-To run the backend and built frontend in Docker Compose:
+## 数据源实现
+
+### Google Routes
+
+`app/providers/google.py` 调用：
+
+```text
+POST https://routes.googleapis.com/directions/v2:computeRoutes
+```
+
+关键点：
+
+- 请求体设置 `optimizeWaypointOrder: true`；
+- `X-Goog-FieldMask` 必须包含 `routes.optimizedIntermediateWaypointIndex`，否则请求会失败；
+- 驾车模式使用 `routingPreference: TRAFFIC_AWARE`；
+- 返回的 `polyline.encodedPolyline` 会被解码为 `[lng, lat]` 数组。
+
+Google 官方文档：
+
+- <https://developers.google.com/maps/documentation/routes/compute_route>
+- <https://developers.google.com/maps/documentation/routes/opt-way>
+
+### OSRM
+
+`app/providers/osrm.py`：
+
+- 需要优化顺序且存在途经点时调用 `/trip/v1/driving/...`，参数为
+  `roundtrip=false&source=first&destination=last`；
+- 不优化时调用 `/route/v1/driving/...`；
+- 公共演示实例只提供驾车 profile，步行/骑行会回退到本地模拟。
+
+### 本地模拟
+
+`app/providers/local.py`：
+
+- Haversine 距离；
+- Held-Karp 动态规划求精确的最短访问顺序（最多 10 个途经点，计算量很小）；
+- 按平均速度估算耗时：驾车 32 km/h、步行 4.8 km/h、骑行 15 km/h；
+- 几何为站点之间的直线，仅用于演示。
+
+## 前端
+
+`app/static/` 是原生 HTML/CSS/JS 单页应用：
+
+- `index.html`：页面结构与底部地点选择器；
+- `styles.css`：移动端优先样式，桌面端 900px 以上切换双栏；
+- `app.js`：状态管理、Leaflet 地图、API 调用；
+- `vendor/leaflet/`：本地化的 Leaflet 1.9.4，避免依赖 CDN。
+
+底图默认使用 OpenStreetMap 德国镜像 `tile.openstreetmap.de`。若用户网络无法访问瓦片，页面会提示，但路线折线和标记仍会显示。可以通过 `MAP_TILE_URL` 和 `MAP_TILE_ATTRIBUTION` 切换为其他 OSM 镜像、自建瓦片或已授权的地图服务；切换后请同步更新署名。
+
+## 测试与检查
 
 ```bash
-docker compose run --rm backend bash scripts/prestart.sh
-docker compose watch
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
 ```
 
-Now you can open these URLs:
+测试不依赖外部网络：
 
-Application, with the frontend and API served by FastAPI: <http://localhost:8000>
+- `tests/test_local_optimizer.py`：距离计算与 Held-Karp 排序；
+- `tests/test_polyline.py`：Google polyline 解码；
+- `tests/test_api.py`：健康检查、地点库、参数校验、本地路线。
 
-Automatic interactive API documentation with Swagger UI: <http://localhost:8000/docs>
+## 常见改动
 
-Adminer, database web administration: <http://localhost:8080>
+### 调整途经点上限
 
-Traefik UI, to see how the routes are being handled by the proxy: <http://localhost:8090>
+修改 `app/config.py` 的 `MAX_INTERMEDIATES`，同时同步前端 `app/static/app.js` 中的 `MAX_INTERMEDIATES` 常量。Google Routes API 可支持更多途经点；OSRM 公共实例请控制请求规模。
 
-Mailpit: <http://localhost:8025>
+### 增加地址搜索
 
-Stop a locally running FastAPI server before starting the Compose backend because both use port `8000`.
+当前地点来源是内置推荐地点、地图选点和坐标输入。可以：
 
-**Note**: The first time you start the stack, it might take a minute for all the services to be ready. To monitor it, use `docker compose logs`, or `docker compose logs backend` for the backend service.
+- 在 `app/api.py` 增加 `/api/geocode`，服务端调用 Google Geocoding / Places API；
+- 或接入高德地图 Web 服务 API；
+- 前端在 `renderPlaces()` 旁增加搜索框，选中结果后复用 `applyPlace()`。
 
-## Mailpit
+### 增加时间窗 / 人员排班
 
-[Mailpit](https://mailpit.axllent.org) captures emails sent during local development instead of delivering them. The local backend connects to it at `localhost:1025`, and the Compose backend connects to the `mailpit` service. Captured emails are available at <http://localhost:8025>.
-
-## Docker Compose Files and Environment Variables
-
-The main `compose.yml` file contains the configuration shared by the whole stack. Docker Compose loads it automatically.
-
-The `compose.override.yml` file adds local development settings, such as mounting the source code as a volume. Docker Compose also loads it automatically and applies it on top of `compose.yml`.
-
-The `compose.deploy.yml` file contains the deployment-specific settings, including HTTPS and automatic certificate handling. It is explicitly combined with `compose.yml` when deploying the application.
-
-The backend reads local settings from the `.env` file. Docker Compose also uses it for variable interpolation and passes the settings each container needs.
-
-After changing variables, make sure you restart the stack:
-
-```bash
-docker compose watch
-```
-
-## The `.env` File
-
-The tracked `.env` file contains local development defaults, passwords, and other configuration. Its hostnames use `localhost` for processes running on your machine. Docker Compose overrides hostnames such as the database and SMTP server with their Compose service names.
-
-Do not store deployment secrets in `.env`. Configure them as described in the [FastAPI Cloud deployment guide](./deployment.md) or the [Docker Compose deployment guide](./deployment-docker-compose.md).
-
-## Pre-commit Hooks and Code Linting
-
-The project uses [prek](https://prek.j178.dev/), a modern alternative to [pre-commit](https://pre-commit.com/), for code linting and formatting.
-
-You can find a file `.pre-commit-config.yaml` with configurations at the root of the project.
-
-### Install `prek` to Run Automatically
-
-`prek` is already part of the dependencies of the project.
-
-From the project root, install the Git hook so that `prek` runs automatically before each commit:
-
-```bash
-uv run prek install -f
-```
-
-The `-f` flag forces the installation, in case there was already a `pre-commit` hook previously installed.
-
-Now whenever you try to commit, for example with:
-
-```bash
-git commit
-```
-
-`prek` will check and format the code you are about to commit. If it modifies any files, add those files to Git again before committing.
-
-### Run `prek` Manually
-
-You can also run `prek` manually on all files from the project root:
-
-```bash
-uv run prek run --all-files
-```
+当前目标是「最短行程时间/距离」。若需要「在指定时间窗内拜访」，可在 `OptimizeRequest` 中为每个地点增加 `earliest` / `latest` / `service_minutes`，并把本地优化器替换为带时间窗的 VRP 求解器；Google Routes API 的 `optimizeWaypointOrder` 本身不处理时间窗。

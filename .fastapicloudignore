@@ -1,2 +1,17 @@
+# Keep the FastAPI Cloud deployment package focused on the demo app.
 .env
-!backend/app/frontend/
+.env.example
+.venv/
+.git/
+.agents/
+.claude/
+tests/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+node_modules/
