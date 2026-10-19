@@ -183,6 +183,120 @@ tests/                   # pytest 单元测试与 API 测试
 pyproject.toml           # 依赖与 [tool.fastapi] entrypoint
 ```
 
+## 技术实现
+
+这一节按「前端调用 API → 后端访问数据源 → 前端把返回结果画到地图上」的链路说明实现细节，便于开发人员快速上手。
+
+### API 调用
+
+**前端如何调用后端**（`app/static/app.js`）
+
+页面加载时通过 `fetch` 并行请求两个接口：
+
+- `GET /api/health`：读取 `google_configured`（决定 Google 选项是否可用）、`default_provider`，以及 `map_tile_url` / `map_tile_attribution` / `map_tile_max_zoom`（用于初始化底图）。请求失败时顶部状态徽标显示「后端未连接」。
+- `GET /api/places`：读取内置城市与推荐地点；失败时回退到 `app.js` 内的 `FALLBACK_CITIES`，页面仍可操作。
+
+另外，`app.js` 顶部的 `MAX_INTERMEDIATES = 10` 是后端 `MAX_INTERMEDIATES` 的镜像常量，调整上限时两处需要同步。
+
+点击「开始优化行程」后，`runOptimize()` 组装 JSON 并 `POST /api/optimize`：
+
+```js
+const payload = {
+  origin: { name, lat, lng },
+  end_mode: state.endMode,        // "open" | "fixed"
+  intermediates: [...],
+  travel_mode: state.travelMode,  // "DRIVE" | "WALK" | "BICYCLE"
+  optimize: state.optimize,
+  provider: state.provider,       // "auto" | "google" | "osrm" | "local"
+};
+if (state.endMode === "fixed") payload.destination = { name, lat, lng };
+```
+
+开放模式不发送 `destination`，固定模式才发送。请求期间 `setBusy(true)` 禁用表单并显示 spinner；成功后用 `renderResult(data)` 更新统计与站点列表、用 `drawResult(data)` 重绘地图；失败时 `extractError()` 读取 FastAPI 的 `detail` 字段并 toast 提示。
+
+**后端如何调用数据源**（`app/providers/`）
+
+`POST /api/optimize` 先由 `app/schemas.py` 的 Pydantic 模型校验 `end_mode` 与 `destination` 的互斥关系，再检查 `MAX_INTERMEDIATES` 上限，最后由 `app/routing.py` 分派：
+
+- **Google Routes**（`google.py`）：`httpx.AsyncClient.post()` 调用
+  `https://routes.googleapis.com/directions/v2:computeRoutes`。
+  - Header：`X-Goog-Api-Key`、`X-Goog-FieldMask`（仅请求 `duration`、`distanceMeters`、`encodedPolyline`、`optimizedIntermediateWaypointIndex`、`legs`）、`X-Server-Timeout`。
+  - Body：`origin` / `destination` / `intermediates` 统一为 `{location: {latLng: {latitude, longitude}}}`；`optimizeWaypointOrder` 控制是否让 Google 排序；驾车模式附加 `routingPreference: "TRAFFIC_AWARE"`。
+  - 开放路线适配：`computeRoutes` 必须提供 destination，因此先用本地 `optimal_open_order()` 选出末站作为 destination，其余点位作为 intermediates 交给 Google；返回后再把 Google 的局部下标映射回原始输入下标。
+- **OSRM**（`osrm.py`）：`httpx.AsyncClient.get()` 调用
+  `{OSRM_BASE_URL}/trip/v1/driving/{lng,lat;lng,lat;...}`（不优化或点数 ≤ 2 时改用 `/route/`）。
+  - 固定终点：`roundtrip=false&source=first&destination=last`；
+  - 开放路线：`roundtrip=false&source=first`，不传 `destination`，由 OSRM 自行选择最后一站；
+  - 固定参数：`geometries=geojson&overview=simplified&steps=false`。
+- **本地模拟**（`local.py`）：不发起网络请求，直接用 `app/tsp.py` 的 Haversine + Held-Karp（`O(2^n·n²)`，最多 10 个点位）求解顺序，按平均速度估算耗时（驾车 32 / 步行 4.8 / 骑行 15 km/h）。
+- **auto 降级**（`routing.py`）：已配置 Key 时先试 Google，否则直接试 OSRM；两者都失败则回退本地模拟，错误信息汇总到 `fallback_reason` 一并返回。
+
+三种实现最终都产出同构的 `OptimizeResponse`，前端不需要关心实际数据源。`GOOGLE_MAPS_API_KEY` 只在服务端读取，不会下发到浏览器。
+
+### 地图实现
+
+- Leaflet 1.9.4 已本地化到 `app/static/vendor/leaflet/`，`index.html` 用普通 `<script>` 引入，无 CDN、无构建步骤。
+- `app.js` 启动时创建地图，缩放控件放在右下角：
+
+```js
+const map = L.map("map", { zoomControl: false, attributionControl: false })
+  .setView(DEFAULT_CENTER, 12);
+L.control.zoom({ position: "bottomright" }).addTo(map);
+```
+
+- 底图是标准 `L.tileLayer`，瓦片地址、最大缩放和署名来自 `/api/health`（对应 `MAP_TILE_URL` 等环境变量），默认使用 OpenStreetMap 德国镜像。`tileerror` 只提示「底图加载失败，路线仍可正常显示」，不会阻断路线绘制。
+- 地图上挂三个 `L.layerGroup`，每次渲染前先 `clearLayers()`，互不干扰：
+  - `previewLayer`：编辑阶段的预览（虚线 + 起/途经/终标记）；
+  - `routeLayer`：优化结果（真实路径 + 有序站点标记）；
+  - `meLayer`：浏览器定位得到的当前位置圆点。
+- 站点图标用 `L.divIcon` + CSS 绘制（`makeIcon(label, kind)`），不依赖图片资源；`kind` 为 `start` / `stop` / `end` 决定配色，`label` 是「起」「终」或途经序号。
+
+### 根据 API 返回绘制路径
+
+后端在三种数据源中把几何统一成 `geometry: [[lng, lat], ...]`：
+
+- **Google**：`decode_polyline()` 解码 `polyline.encodedPolyline`，把 Google 的 1e5 定点编码还原为 `[lng, lat]`；
+- **OSRM**：`geometries=geojson` 返回的 `geometry.coordinates` 本身就是 `[lng, lat]`（`/trip` 取 `trips[0]`，`/route` 取 `routes[0]`）；
+- **本地模拟**：用相邻站点坐标构造直线段。
+
+任一路径缺少几何时，后端都会退化为「按最终顺序连接各站点」的直线，保证前端始终有可画的数据。
+
+前端 `drawResult(data)` 的绘制过程：
+
+1. **坐标顺序转换**：Leaflet 使用 `[lat, lng]`，而后端统一返回 `[lng, lat]`，因此这里要反转并过滤非法值：
+
+```js
+const latlngs = (data.geometry || [])
+  .map(([lng, lat]) => [Number(lat), Number(lng)])
+  .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+```
+
+2. **绘制折线**：先画一条 10px 白色描边，再叠加一条 5px 橙色主线，形成高对比的「描边 + 芯线」效果；`lineCap` / `lineJoin` 设为 `round`，让转弯处更自然：
+
+```js
+L.polyline(latlngs, {
+  color: "#ffffff", weight: 10, opacity: 0.9,
+  lineCap: "round", lineJoin: "round",
+}).addTo(routeLayer);
+L.polyline(latlngs, {
+  color: "#e4572e", weight: 5, opacity: 0.96,
+  lineCap: "round", lineJoin: "round",
+}).addTo(routeLayer);
+```
+
+3. **按最终顺序打点**：遍历 `data.stops`（后端已按优化后的顺序排列），根据 `stop.role`（`origin` / `intermediate` / `destination`）生成「起」、序号或「终」图标；每个 marker 绑定 popup，显示站名和「上一站到此」的分段里程、耗时。
+4. **自动取景**：用 `map.fitBounds(L.latLngBounds(latlngs), { padding..., maxZoom: 15 })` 让整条路线落入可视区域；结果面板展开后延迟调用 `map.invalidateSize()`，避免容器尺寸变化导致地图错位。
+
+编辑地点时的 `renderPreview()` 使用另一套逻辑：按当前输入顺序（不做优化）把点位连成橙色虚线，只用于展示分布；发起优化后，`drawResult()` 会先清空预览层和旧路线，再绘制结果。
+
+### 测试与质量
+
+- `tests/test_api.py`：通过 `TestClient` 覆盖健康检查、地点库、两种模式的参数校验与本地路线。
+- `tests/test_local_optimizer.py`：Haversine 距离、固定终点排序、开放路径排序。
+- `tests/test_provider_parsing.py`：直接调用 Google/OSRM 的解析函数，用固定 JSON 样本验证顺序映射、末站选择与降级逻辑，不发起真实网络请求。
+- `tests/test_polyline.py`：Google polyline 解码。
+- 质量门槛：`ruff check`、`ruff format --check`、`mypy --strict`（见 `pyproject.toml`），配置为 Python 3.14。
+
 ## 开发与测试
 
 ```bash
