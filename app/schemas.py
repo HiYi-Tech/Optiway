@@ -1,12 +1,13 @@
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.config import ProviderName
 
 TravelMode = Literal["DRIVE", "WALK", "BICYCLE"]
 StopRole = Literal["origin", "intermediate", "destination"]
 ActualProvider = Literal["google", "osrm", "local"]
+EndMode = Literal["fixed", "open"]
 
 
 class Place(BaseModel):
@@ -17,11 +18,27 @@ class Place(BaseModel):
 
 class OptimizeRequest(BaseModel):
     origin: Place
-    destination: Place
+    # open: only the origin is fixed; every other point is ordered by the algorithm.
+    # fixed: origin and destination are fixed; only intermediates are reordered.
+    end_mode: EndMode = "open"
+    destination: Place | None = None
     intermediates: list[Place] = Field(default_factory=list)
     travel_mode: TravelMode = "DRIVE"
     optimize: bool = True
     provider: ProviderName | None = None
+
+    @model_validator(mode="after")
+    def _validate_end_mode(self) -> Self:
+        if self.end_mode == "open":
+            if self.destination is not None:
+                raise ValueError(
+                    "开放路线模式请将所有非起点地点放入 intermediates，不要提供 destination。"
+                )
+            if not self.intermediates:
+                raise ValueError("开放路线模式至少需要一个拜访点。")
+        elif self.destination is None:
+            raise ValueError("固定终点模式需要提供 destination。")
+        return self
 
 
 class StopResult(BaseModel):
@@ -38,6 +55,7 @@ class OptimizeResponse(BaseModel):
     provider: ActualProvider
     provider_label: str
     requested_provider: ProviderName
+    end_mode: EndMode
     optimized: bool
     fallback_reason: str | None = None
     note: str | None = None
@@ -46,7 +64,9 @@ class OptimizeResponse(BaseModel):
     total_duration_seconds: float
     # [longitude, latitude] pairs, ready for Leaflet after swapping.
     geometry: list[list[float]]
-    # Original indices of the intermediate stops, in optimized order.
+    # Original indices of the ordered non-origin points.
+    # open mode: includes the algorithm-chosen final point.
+    # fixed mode: only intermediates (the fixed destination is excluded).
     optimized_indices: list[int]
 
 

@@ -56,7 +56,8 @@ POST https://routes.googleapis.com/directions/v2:computeRoutes
 - 请求体设置 `optimizeWaypointOrder: true`；
 - `X-Goog-FieldMask` 必须包含 `routes.optimizedIntermediateWaypointIndex`，否则请求会失败；
 - 驾车模式使用 `routingPreference: TRAFFIC_AWARE`；
-- 返回的 `polyline.encodedPolyline` 会被解码为 `[lng, lat]` 数组。
+- 返回的 `polyline.encodedPolyline` 会被解码为 `[lng, lat]` 数组；
+- `computeRoutes` 必须提供 `destination`。开放路线模式下，先用 `app/tsp.py` 的开放路径算法选出最后一站，把它作为 Google 的 destination，其余点位作为 intermediates 交给 Google 排序。
 
 Google 官方文档：
 
@@ -67,17 +68,23 @@ Google 官方文档：
 
 `app/providers/osrm.py`：
 
-- 需要优化顺序且存在途经点时调用 `/trip/v1/driving/...`，参数为
-  `roundtrip=false&source=first&destination=last`；
+- 需要优化顺序且点位数大于 2 时调用 `/trip/v1/driving/...`；
+- 固定终点模式使用 `roundtrip=false&source=first&destination=last`；
+- 开放路线模式使用 `roundtrip=false&source=first`，不传 `destination`，由 OSRM 自行选择最后一站；
 - 不优化时调用 `/route/v1/driving/...`；
 - 公共演示实例只提供驾车 profile，步行/骑行会回退到本地模拟。
 
 ### 本地模拟
 
-`app/providers/local.py`：
+`app/tsp.py`：
 
 - Haversine 距离；
-- Held-Karp 动态规划求精确的最短访问顺序（最多 10 个途经点，计算量很小）；
+- Held-Karp 动态规划求精确最短顺序（最多 10 个点位，计算量很小）；
+- `optimal_fixed_order()`：起点和终点固定；
+- `optimal_open_order()`：只固定起点，在所有点位上选择代价最小的终点。
+
+`app/providers/local.py` 负责把排序结果组装为统一的 `OptimizeResponse`：
+
 - 按平均速度估算耗时：驾车 32 km/h、步行 4.8 km/h、骑行 15 km/h；
 - 几何为站点之间的直线，仅用于演示。
 
@@ -85,9 +92,9 @@ Google 官方文档：
 
 `app/static/` 是原生 HTML/CSS/JS 单页应用：
 
-- `index.html`：页面结构与底部地点选择器；
+- `index.html`：页面结构、路线模式切换与底部地点选择器；
 - `styles.css`：移动端优先样式，桌面端 900px 以上切换双栏；
-- `app.js`：状态管理、Leaflet 地图、API 调用；
+- `app.js`：状态管理、Leaflet 地图、开放/固定终点模式与 API 调用；
 - `vendor/leaflet/`：本地化的 Leaflet 1.9.4，避免依赖 CDN。
 
 底图默认使用 OpenStreetMap 德国镜像 `tile.openstreetmap.de`。若用户网络无法访问瓦片，页面会提示，但路线折线和标记仍会显示。可以通过 `MAP_TILE_URL` 和 `MAP_TILE_ATTRIBUTION` 切换为其他 OSM 镜像、自建瓦片或已授权的地图服务；切换后请同步更新署名。
@@ -103,15 +110,16 @@ uv run mypy app
 
 测试不依赖外部网络：
 
-- `tests/test_local_optimizer.py`：距离计算与 Held-Karp 排序；
+- `tests/test_local_optimizer.py`：距离计算、固定终点排序与开放路径排序；
+- `tests/test_provider_parsing.py`：Google/OSRM 固定终点与开放路线的响应映射；
 - `tests/test_polyline.py`：Google polyline 解码；
-- `tests/test_api.py`：健康检查、地点库、参数校验、本地路线。
+- `tests/test_api.py`：健康检查、地点库、模式校验、本地路线。
 
 ## 常见改动
 
-### 调整途经点上限
+### 调整点位上限
 
-修改 `app/config.py` 的 `MAX_INTERMEDIATES`，同时同步前端 `app/static/app.js` 中的 `MAX_INTERMEDIATES` 常量。Google Routes API 可支持更多途经点；OSRM 公共实例请控制请求规模。
+修改 `app/config.py` 的 `MAX_INTERMEDIATES`，同时同步前端 `app/static/app.js` 中的 `MAX_INTERMEDIATES` 常量。开放模式下它表示拜访点上限，固定终点模式下表示途经点上限。Google Routes API 可支持更多点位；OSRM 公共实例请控制请求规模。
 
 ### 增加地址搜索
 

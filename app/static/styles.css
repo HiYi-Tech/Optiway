@@ -508,6 +508,42 @@ h1 em::after {
   line-height: 1.65;
 }
 
+.mode-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper-2);
+}
+
+.mode-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mode-copy strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mode-copy small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.mode-card .segmented button {
+  padding: 0 10px;
+}
+
 /* ---------- Stops ---------- */
 
 .stops-card {
@@ -976,6 +1012,21 @@ h1 em::after {
   font-weight: 750;
   letter-spacing: -0.03em;
   white-space: nowrap;
+}
+
+.result-mode-note {
+  display: inline-block;
+  margin: 8px 0 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.result-mode-note:empty {
+  display: none;
 }
 
 .result-note {
@@ -1579,6 +1630,16 @@ h1 em::after {
 
   .panel-inner {
     padding: 36px 32px 28px;
+  }
+}
+
+@media (max-width: 420px) {
+  .mode-card .segmented {
+    width: 100%;
+  }
+
+  .mode-card .segmented button {
+    flex: 1;
   }
 }
 

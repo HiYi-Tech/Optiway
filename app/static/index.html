@@ -67,7 +67,7 @@
         <div class="map-legend">
           <span><i class="legend-dot start"></i>起点</span>
           <span><i class="legend-dot stop"></i>途经</span>
-          <span><i class="legend-dot end"></i>终点</span>
+          <span><i class="legend-dot end"></i>末站</span>
         </div>
       </section>
 
@@ -80,11 +80,32 @@
             </div>
             <h1>把多点行程<br /><em>排成一条顺路</em></h1>
             <p class="intro">
-              输入起点、终点与途经点，自动计算更省时的拜访顺序。适合地推、巡检、客户拜访与接送安排。
+              输入起点与要拜访的地点，自动规划其余全部点位的拜访顺序；也可以切换为固定终点模式。适合地推、巡检、客户拜访与接送安排。
             </p>
           </header>
 
           <form id="routeForm" class="route-form" novalidate>
+            <div class="mode-card">
+              <div class="mode-copy">
+                <span class="option-label">路线模式</span>
+                <strong id="modeTitle">仅固定起点</strong>
+                <small id="modeHint">其余全部点位由算法排序，最后一站自动选择。</small>
+              </div>
+              <div class="segmented" id="endMode" role="group" aria-label="路线模式">
+                <button
+                  type="button"
+                  data-end-mode="open"
+                  class="active"
+                  aria-pressed="true"
+                >
+                  开放路线
+                </button>
+                <button type="button" data-end-mode="fixed" aria-pressed="false">
+                  固定终点
+                </button>
+              </div>
+            </div>
+
             <div class="stops-card">
               <div class="stop-row" id="originRow">
                 <span class="stop-dot start" aria-hidden="true">起</span>
@@ -111,11 +132,11 @@
 
               <button type="button" id="addStopBtn" class="add-stop">
                 <span class="add-icon" aria-hidden="true">+</span>
-                添加途经点
+                <span id="addStopLabel">添加拜访点</span>
                 <span id="stopCount" class="count">0 / 10</span>
               </button>
 
-              <div class="stop-row" id="destinationRow">
+              <div class="stop-row hidden" id="destinationRow">
                 <span class="stop-dot end" aria-hidden="true">终</span>
                 <button
                   type="button"
@@ -123,7 +144,7 @@
                   id="destinationBtn"
                   aria-label="修改终点"
                 >
-                  <span class="stop-label">终点</span>
+                  <span class="stop-label">固定终点</span>
                   <span class="stop-name" id="destinationName">选择终点</span>
                 </button>
                 <button
@@ -155,7 +176,7 @@
                   <span class="switch-track" aria-hidden="true"></span>
                   <span class="switch-copy">
                     <strong>自动优化顺序</strong>
-                    <small>起点和终点固定，途经点自动排序</small>
+                    <small id="optimizeHint">仅起点固定，其余点位自动排序</small>
                   </span>
                 </label>
               </div>
@@ -173,7 +194,7 @@
 
             <button id="optimizeBtn" class="primary-button" type="submit">
               <span class="button-label">开始优化行程</span>
-              <span class="button-meta" id="buttonMeta">0 个途经点</span>
+              <span class="button-meta" id="buttonMeta">0 个拜访点</span>
               <span class="spinner hidden" aria-hidden="true"></span>
             </button>
             <p class="fine-print" id="providerHint">
@@ -189,6 +210,7 @@
               </div>
               <span id="resultProvider" class="provider-chip">OSRM</span>
             </div>
+            <p id="resultModeNote" class="result-mode-note"></p>
 
             <div class="stats-grid">
               <div class="stat">

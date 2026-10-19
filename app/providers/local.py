@@ -1,83 +1,13 @@
-import math
-
 from app.config import ProviderName
-from app.schemas import OptimizeRequest, OptimizeResponse, Place, StopResult, StopRole
+from app.providers.base import ProviderRequestError
+from app.schemas import OptimizeRequest, OptimizeResponse, StopResult, StopRole
+from app.tsp import haversine_m, optimal_fixed_order, optimal_open_order
 
-EARTH_RADIUS_M = 6_371_000.0
 AVERAGE_SPEED_KMH = {
     "DRIVE": 32.0,
     "WALK": 4.8,
     "BICYCLE": 15.0,
 }
-
-
-def haversine_m(a: Place, b: Place) -> float:
-    """Great-circle distance between two places, in meters."""
-    lat1 = math.radians(a.lat)
-    lat2 = math.radians(b.lat)
-    delta_lat = lat2 - lat1
-    delta_lng = math.radians(b.lng - a.lng)
-    h = (
-        math.sin(delta_lat / 2) ** 2
-        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lng / 2) ** 2
-    )
-    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(h))
-
-
-def optimal_intermediate_order(
-    origin: Place, destination: Place, intermediates: list[Place]
-) -> list[int]:
-    """Exact shortest path order for intermediate stops (Held-Karp).
-
-    The demo caps intermediates at 10, so the 2^n * n^2 dynamic program is cheap.
-    """
-    count = len(intermediates)
-    if count <= 1:
-        return list(range(count))
-
-    size = 1 << count
-    infinity = float("inf")
-    # dp[mask][last] = shortest distance from origin, visiting mask, ending at last.
-    dp = [[infinity] * count for _ in range(size)]
-    parent = [[-1] * count for _ in range(size)]
-
-    for index in range(count):
-        dp[1 << index][index] = haversine_m(origin, intermediates[index])
-
-    for mask in range(size):
-        for last in range(count):
-            if not mask & (1 << last):
-                continue
-            current = dp[mask][last]
-            if current == infinity:
-                continue
-            remaining = (size - 1) ^ mask
-            while remaining:
-                bit = remaining & -remaining
-                nxt = bit.bit_length() - 1
-                candidate = current + haversine_m(intermediates[last], intermediates[nxt])
-                next_mask = mask | bit
-                if candidate < dp[next_mask][nxt]:
-                    dp[next_mask][nxt] = candidate
-                    parent[next_mask][nxt] = last
-                remaining ^= bit
-
-    full_mask = size - 1
-    best_end = min(
-        range(count),
-        key=lambda index: dp[full_mask][index] + haversine_m(intermediates[index], destination),
-    )
-
-    order: list[int] = []
-    mask = full_mask
-    end = best_end
-    while end != -1:
-        order.append(end)
-        previous = parent[mask][end]
-        mask ^= 1 << end
-        end = previous
-    order.reverse()
-    return order
 
 
 def optimize_local(
@@ -88,15 +18,39 @@ def optimize_local(
     note: str | None = None,
 ) -> OptimizeResponse:
     """Offline fallback: straight-line distances plus a simple average speed."""
-    order = list(range(len(request.intermediates)))
-    if request.optimize and len(request.intermediates) > 1:
-        order = optimal_intermediate_order(
-            request.origin, request.destination, request.intermediates
+    if request.end_mode == "open":
+        pool = request.intermediates
+        if not pool:
+            raise ProviderRequestError("开放路线模式至少需要一个拜访点。")
+
+        order = list(range(len(pool)))
+        if request.optimize and len(pool) > 1:
+            order = optimal_open_order(request.origin, pool)
+        ordered_places = [request.origin] + [pool[index] for index in order]
+        optimized = request.optimize and len(pool) > 1
+        note_fallback = (
+            "本地模拟：仅固定起点，其余点位顺序和最后一站由算法选择；按直线距离和平均速度估算。"
+            if optimized
+            else "本地模拟：仅固定起点，保持输入顺序；按直线距离和平均速度估算。"
+        )
+    else:
+        destination = request.destination
+        if destination is None:
+            raise ProviderRequestError("固定终点模式需要提供终点。")
+
+        order = list(range(len(request.intermediates)))
+        if request.optimize and len(request.intermediates) > 1:
+            order = optimal_fixed_order(request.origin, destination, request.intermediates)
+        ordered_places = (
+            [request.origin] + [request.intermediates[index] for index in order] + [destination]
+        )
+        optimized = request.optimize and len(request.intermediates) > 0
+        note_fallback = (
+            "本地模拟：起点和终点固定，中间点位按直线距离优化；耗时按平均速度估算。"
+            if optimized
+            else "本地模拟：保持输入顺序，耗时按平均速度估算。"
         )
 
-    ordered_places = (
-        [request.origin] + [request.intermediates[index] for index in order] + [request.destination]
-    )
     speed_mps = AVERAGE_SPEED_KMH[request.travel_mode] * 1000 / 3600
     stops: list[StopResult] = []
     geometry: list[list[float]] = [[ordered_places[0].lng, ordered_places[0].lat]]
@@ -140,9 +94,10 @@ def optimize_local(
         provider="local",
         provider_label="本地模拟",
         requested_provider=requested_provider,
-        optimized=request.optimize and len(request.intermediates) > 0,
+        end_mode=request.end_mode,
+        optimized=optimized,
         fallback_reason=fallback_reason,
-        note=note or "本地模拟按直线距离和平均速度估算，仅用于验证排序逻辑。",
+        note=note or note_fallback,
         stops=stops,
         total_distance_meters=round(total_distance, 1),
         total_duration_seconds=round(total_duration, 1),

@@ -3,8 +3,13 @@ from typing import Any
 import httpx
 
 from app.config import ProviderName, settings
-from app.providers.base import ProviderNotConfiguredError, RouteProviderError
+from app.providers.base import (
+    ProviderNotConfiguredError,
+    ProviderRequestError,
+    RouteProviderError,
+)
 from app.schemas import OptimizeRequest, OptimizeResponse, Place, StopResult, StopRole
+from app.tsp import optimal_open_order
 
 GOOGLE_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 FIELD_MASK = ",".join(
@@ -95,31 +100,64 @@ def _lat_lng(place: Place) -> dict[str, Any]:
     }
 
 
+def _open_terminal_index(request: OptimizeRequest) -> int:
+    """Pick the final stop for an open route.
+
+    Google Routes requires a fixed destination. For open routes we use the
+    local exact open-path solver to choose which point should be last, then let
+    Google optimize the order of the remaining points.
+    """
+    pool = request.intermediates
+    if not pool:
+        raise ProviderRequestError("开放路线模式至少需要一个拜访点。")
+    if request.optimize and len(pool) > 1:
+        return optimal_open_order(request.origin, pool)[-1]
+    return len(pool) - 1
+
+
 def _parse_response(
     payload: dict[str, Any],
     request: OptimizeRequest,
     requested_provider: ProviderName,
     fallback_reason: str | None,
+    *,
+    destination: Place,
+    google_intermediates: list[Place],
+    intermediate_indices: list[int],
+    terminal_index: int | None,
 ) -> OptimizeResponse:
     routes = payload.get("routes") or []
     if not routes:
         raise RouteProviderError("Google Routes 没有返回可用路线，请调整地点、出行方式或稍后重试。")
 
     route = routes[0]
-    intermediate_count = len(request.intermediates)
+    intermediate_count = len(google_intermediates)
     if request.optimize and intermediate_count > 0:
-        order = route.get("optimizedIntermediateWaypointIndex")
-        if not isinstance(order, list):
-            order = list(range(intermediate_count))
-        order = [int(index) for index in order]
+        raw_order = route.get("optimizedIntermediateWaypointIndex")
+        if not isinstance(raw_order, list):
+            raw_order = list(range(intermediate_count))
+        order = [int(index) for index in raw_order]
         if sorted(order) != list(range(intermediate_count)):
             raise RouteProviderError("Google Routes 返回的途经点顺序不符合预期，请重试。")
     else:
         order = list(range(intermediate_count))
 
-    ordered_points = (
-        [request.origin] + [request.intermediates[index] for index in order] + [request.destination]
-    )
+    if request.end_mode == "open":
+        if terminal_index is None:
+            raise RouteProviderError("开放路线缺少算法选择的最后一站。")
+        ordered_pool_indices = [intermediate_indices[index] for index in order] + [terminal_index]
+        ordered_points = [request.origin] + [
+            request.intermediates[index] for index in ordered_pool_indices
+        ]
+        optimized_indices = ordered_pool_indices
+        optimized = bool(request.optimize and len(request.intermediates) > 1)
+    else:
+        ordered_points = (
+            [request.origin] + [google_intermediates[index] for index in order] + [destination]
+        )
+        optimized_indices = order
+        optimized = bool(request.optimize and intermediate_count > 0)
+
     legs: list[Any] = route.get("legs") or []
 
     stops: list[StopResult] = []
@@ -160,9 +198,16 @@ def _parse_response(
     total_distance = float(route_distance) if route_distance is not None else total_distance
     total_duration = _seconds(route_duration) if route_duration is not None else total_duration
 
-    optimized = bool(request.optimize and intermediate_count > 0)
     mode_label = MODE_LABELS[request.travel_mode]
-    if optimized:
+    if request.end_mode == "open":
+        note = (
+            f"Google Routes 开放路线（{mode_label}）：系统先选择最后一站，"
+            "再由 Google 优化其余点位顺序。"
+            if optimized
+            else f"Google Routes 开放路线（{mode_label}）：保持输入顺序，"
+            "最后一站为输入中的最后一个点位。"
+        )
+    elif optimized:
         note = f"由 Google Routes API 计算（{mode_label}），途经顺序由 optimizeWaypointOrder 优化。"
     else:
         note = f"由 Google Routes API 计算（{mode_label}），保持输入顺序。"
@@ -171,6 +216,7 @@ def _parse_response(
         provider="google",
         provider_label=f"Google Routes · {mode_label}",
         requested_provider=requested_provider,
+        end_mode=request.end_mode,
         optimized=optimized,
         fallback_reason=fallback_reason,
         note=note,
@@ -178,7 +224,7 @@ def _parse_response(
         total_distance_meters=round(total_distance, 1),
         total_duration_seconds=round(total_duration, 1),
         geometry=geometry,
-        optimized_indices=order,
+        optimized_indices=optimized_indices,
     )
 
 
@@ -192,16 +238,31 @@ async def optimize_google(
     if not api_key:
         raise ProviderNotConfiguredError("未配置 GOOGLE_MAPS_API_KEY，无法使用 Google Routes API。")
 
+    if request.end_mode == "open":
+        terminal_index = _open_terminal_index(request)
+        destination = request.intermediates[terminal_index]
+        intermediate_indices = [
+            index for index in range(len(request.intermediates)) if index != terminal_index
+        ]
+        google_intermediates = [request.intermediates[index] for index in intermediate_indices]
+    else:
+        if request.destination is None:
+            raise ProviderRequestError("固定终点模式需要提供终点。")
+        destination = request.destination
+        terminal_index = None
+        intermediate_indices = list(range(len(request.intermediates)))
+        google_intermediates = list(request.intermediates)
+
     body: dict[str, Any] = {
         "origin": _lat_lng(request.origin),
-        "destination": _lat_lng(request.destination),
+        "destination": _lat_lng(destination),
         "travelMode": request.travel_mode,
         "languageCode": "zh-CN",
         "units": "METRIC",
-        "optimizeWaypointOrder": bool(request.optimize and request.intermediates),
+        "optimizeWaypointOrder": bool(request.optimize and google_intermediates),
     }
-    if request.intermediates:
-        body["intermediates"] = [_lat_lng(place) for place in request.intermediates]
+    if google_intermediates:
+        body["intermediates"] = [_lat_lng(place) for place in google_intermediates]
     if request.travel_mode == "DRIVE":
         body["routingPreference"] = "TRAFFIC_AWARE"
 
@@ -222,7 +283,8 @@ async def optimize_google(
 
     if response.status_code != 200:
         try:
-            error = response.json().get("error", {})
+            error_payload = response.json()
+            error = error_payload.get("error", {}) if isinstance(error_payload, dict) else {}
             message = error.get("message") or response.text[:300]
         except ValueError:
             message = response.text[:300]
@@ -235,4 +297,13 @@ async def optimize_google(
     except ValueError as exc:
         raise RouteProviderError("Google Routes API 返回了无法解析的响应。") from exc
 
-    return _parse_response(payload, request, requested_provider, fallback_reason)
+    return _parse_response(
+        payload,
+        request,
+        requested_provider,
+        fallback_reason,
+        destination=destination,
+        google_intermediates=google_intermediates,
+        intermediate_indices=intermediate_indices,
+        terminal_index=terminal_index,
+    )

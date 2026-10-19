@@ -6,7 +6,8 @@
 
 ## 能验证什么
 
-- 输入起点、终点与最多 10 个途经点，自动计算更省时的拜访顺序。
+- **默认仅固定起点**：系统对起点之后的全部点位排序，并自动选择最后一站；也可以切换为固定终点模式。
+- 输入起点与最多 10 个拜访点，自动计算更省时的拜访顺序。
 - 展示优化后的站点顺序、总里程、总耗时、分段里程/耗时与累计耗时。
 - 在地图上显示真实道路路线或直线示意，支持点击地图选点。
 - 三种数据源可切换：Google Routes、OSRM 公共演示服务、本地模拟。
@@ -20,6 +21,8 @@
 | Google Routes API | 是 | 真实道路 | `optimizeWaypointOrder` | 驾车模式使用实时路况；需要启用 Routes API 和结算账号 |
 | OSRM 公共演示服务 | 否 | 真实道路 | `/trip` 服务 | 仅支持驾车；公共实例有公平使用限制，不保证 SLA |
 | 本地模拟 | 否 | 直线示意 | Held-Karp 精确求解 | 完全离线；按平均速度估算耗时，仅用于验证排序逻辑 |
+
+> Google `computeRoutes` 本身要求固定终点。开放路线模式下，系统先用本地精确算法选择最后一站，再由 Google 优化其余点位顺序；OSRM `/trip` 和本地算法则直接支持“只固定起点”的开放路径。
 
 `auto`（默认）的解析顺序：
 
@@ -80,7 +83,7 @@ uv run fastapi cloud env set GOOGLE_MAPS_API_KEY <your-key> --secret
 
 ### `GET /api/health`
 
-返回服务状态、默认数据源、Google 是否已配置、途经点上限。
+返回服务状态、默认数据源、Google 是否已配置、点位上限。
 
 ### `GET /api/places`
 
@@ -88,17 +91,18 @@ uv run fastapi cloud env set GOOGLE_MAPS_API_KEY <your-key> --secret
 
 ### `POST /api/optimize`
 
-请求示例：
+开放路线请求示例（默认，仅固定起点）：
 
 ```json
 {
   "origin": { "name": "天安门广场", "lat": 39.9087, "lng": 116.3975 },
-  "destination": { "name": "南锣鼓巷", "lat": 39.9376, "lng": 116.4032 },
+  "end_mode": "open",
   "intermediates": [
     { "name": "故宫博物院", "lat": 39.9163, "lng": 116.3972 },
     { "name": "景山公园", "lat": 39.9251, "lng": 116.3967 },
     { "name": "北海公园", "lat": 39.9254, "lng": 116.3891 },
-    { "name": "什刹海", "lat": 39.9403, "lng": 116.383 }
+    { "name": "什刹海", "lat": 39.9403, "lng": 116.383 },
+    { "name": "南锣鼓巷", "lat": 39.9376, "lng": 116.4032 }
   ],
   "travel_mode": "DRIVE",
   "optimize": true,
@@ -106,18 +110,36 @@ uv run fastapi cloud env set GOOGLE_MAPS_API_KEY <your-key> --secret
 }
 ```
 
+- `end_mode`:
+  - `open`（默认）：仅固定起点，`intermediates` 中的全部点位由算法排序，最后一站也由算法选择；此时不能提供 `destination`。
+  - `fixed`：起点和终点固定，只优化 `intermediates` 的顺序；此时必须提供 `destination`。
 - `travel_mode`: `DRIVE` | `WALK` | `BICYCLE`
 - `provider`: `auto` | `google` | `osrm` | `local`（省略时使用服务端默认值）
-- `optimize`: 是否优化途经点顺序；起点和终点始终固定。
+- `optimize`: 是否优化顺序；关闭后保持输入顺序（开放模式下最后一站为输入中的最后一个点位）。
 
-命令行验证（离线、无网络依赖）：
+固定终点模式请求示例：
+
+```json
+{
+  "origin": { "name": "天安门广场", "lat": 39.9087, "lng": 116.3975 },
+  "end_mode": "fixed",
+  "destination": { "name": "南锣鼓巷", "lat": 39.9376, "lng": 116.4032 },
+  "intermediates": [
+    { "name": "故宫博物院", "lat": 39.9163, "lng": 116.3972 },
+    { "name": "北海公园", "lat": 39.9254, "lng": 116.3891 }
+  ],
+  "provider": "auto"
+}
+```
+
+命令行验证开放路线（离线、无网络依赖）：
 
 ```bash
 curl -s http://127.0.0.1:8000/api/optimize \
   -H 'Content-Type: application/json' \
   -d '{
     "origin": {"name": "A", "lat": 39.9087, "lng": 116.3975},
-    "destination": {"name": "D", "lat": 39.9376, "lng": 116.4032},
+    "end_mode": "open",
     "intermediates": [
       {"name": "C", "lat": 39.9251, "lng": 116.3967},
       {"name": "B", "lat": 39.9163, "lng": 116.3972}
@@ -129,11 +151,12 @@ curl -s http://127.0.0.1:8000/api/optimize \
 响应中的关键字段：
 
 - `provider` / `provider_label`：实际使用的数据源及展示名称；
+- `end_mode`：实际执行的路线模式；
 - `optimized`：是否执行了顺序优化；
 - `stops`：按最终顺序排列的站点，包含每段里程、耗时和累计耗时；
 - `total_distance_meters` / `total_duration_seconds`：总里程与总耗时；
 - `geometry`：`[lng, lat]` 坐标数组，可直接交给地图绘制；
-- `optimized_indices`：优化后的途经点在原始输入中的下标；
+- `optimized_indices`：排序后非起点点位在原始输入中的下标。开放模式包含算法选择的最后一站；固定模式只包含中间点位；
 - `fallback_reason`：`auto` 模式发生降级时的原因。
 
 ## 项目结构
@@ -143,13 +166,14 @@ app/
 ├── main.py              # FastAPI 应用与静态页面托管
 ├── api.py               # /api/health、/api/places、/api/optimize
 ├── routing.py           # 数据源选择与自动降级
+├── tsp.py               # Haversine + Held-Karp（固定终点 / 开放路径）
 ├── config.py            # 环境变量配置
 ├── schemas.py           # Pydantic 请求/响应模型
 ├── places.py            # 内置城市与推荐地点
 ├── providers/
 │   ├── google.py        # Google Routes API + polyline 解码
 │   ├── osrm.py          # OSRM route/trip 服务
-│   └── local.py         # Haversine + Held-Karp 本地模拟
+│   └── local.py         # 本地模拟与开放路线
 └── static/
     ├── index.html
     ├── styles.css
@@ -172,7 +196,9 @@ uv run mypy app
 
 ## 设计取舍与限制
 
-- **最多 10 个途经点**：为移动端交互和公共 OSRM 实例负载设置的上限，可通过 `MAX_INTERMEDIATES` 调整。Google Routes API 本身支持更多途经点。
+- **最多 10 个拜访点/途经点**：为移动端交互和公共 OSRM 实例负载设置的上限，可通过 `MAX_INTERMEDIATES` 调整。Google Routes API 本身支持更多点位。
+- **开放路线与固定终点**：默认开放路线只固定起点，算法会同时决定点位顺序和最后一站；固定终点模式则保留原有的“起终点固定、只排中间点位”行为。
+- **Google 开放路线的终点选择**：Google Routes `computeRoutes` 要求固定终点，因此开放模式下先用本地精确算法选出最后一站，再由 Google 优化其余点位；结果可能不是 Google 路网下的全局最优终点组合。
 - **OSRM 公共实例仅驾车**：步行/骑行在未配置 Google 时会回退到本地模拟，并在界面上提示。
 - **本地模拟是直线距离**：只用于验证排序逻辑和交互流程，不代表真实道路里程。
 - **暂未包含地址搜索**：当前支持推荐地点、地图选点、坐标输入。接入 Google Places/Geocoding 或高德地名搜索即可补齐。

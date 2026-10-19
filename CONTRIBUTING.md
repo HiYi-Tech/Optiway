@@ -16,7 +16,7 @@ uv run mypy app
 
 - 后端：FastAPI + Pydantic，类型标注完整；外部服务调用统一放在 `app/providers/`。
 - 前端：原生 HTML/CSS/JS，不引入构建步骤；Leaflet 资源本地化。
-- 新增数据源时实现 `OptimizeResponse` 返回格式，并在 `app/routing.py` 的 `auto` 回退链中注册。
+- 新增数据源时实现 `OptimizeResponse` 返回格式，同时支持 `end_mode="open"`（只固定起点）与 `end_mode="fixed"`（起终点固定），并在 `app/routing.py` 的 `auto` 回退链中注册。
 - 不要在仓库中提交 API Key；本地使用 `.env`，云端使用 FastAPI Cloud 环境变量。
 
 ## 提交前

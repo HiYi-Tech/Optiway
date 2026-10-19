@@ -37,9 +37,10 @@ async def places() -> PlacesResponse:
 @router.post("/optimize", response_model=OptimizeResponse)
 async def optimize(payload: OptimizeRequest) -> OptimizeResponse:
     if len(payload.intermediates) > settings.MAX_INTERMEDIATES:
+        point_label = "拜访点" if payload.end_mode == "open" else "途经点"
         raise HTTPException(
             status_code=422,
-            detail=f"最多支持 {settings.MAX_INTERMEDIATES} 个途经点。",
+            detail=f"最多支持 {settings.MAX_INTERMEDIATES} 个{point_label}。",
         )
     try:
         return await optimize_route(payload)

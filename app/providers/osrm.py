@@ -24,12 +24,11 @@ def _role_for(index: int, total: int) -> StopRole:
 def _parse_payload(
     payload: dict[str, Any],
     request: OptimizeRequest,
+    points: list[Place],
     use_trip: bool,
     requested_provider: ProviderName,
     fallback_reason: str | None,
 ) -> OptimizeResponse:
-    points = [request.origin, *request.intermediates, request.destination]
-
     if use_trip:
         trips = payload.get("trips") or []
         waypoints = payload.get("waypoints") or []
@@ -45,9 +44,15 @@ def _parse_payload(
             )
         except (KeyError, TypeError) as exc:
             raise RouteProviderError("OSRM 返回的途经点顺序无法解析，请重试。") from exc
-        if order[0] != 0 or order[-1] != len(points) - 1:
-            raise RouteProviderError("OSRM 返回的起终点顺序不符合预期，请重试。")
-        optimized_indices = [index - 1 for index in order if 0 < index < len(points) - 1]
+        if order[0] != 0:
+            raise RouteProviderError("OSRM 返回的起点顺序不符合预期，请重试。")
+        if request.end_mode == "fixed" and order[-1] != len(points) - 1:
+            raise RouteProviderError("OSRM 返回的终点顺序不符合预期，请重试。")
+
+        if request.end_mode == "open":
+            optimized_indices = [index - 1 for index in order if index > 0]
+        else:
+            optimized_indices = [index - 1 for index in order if 0 < index < len(points) - 1]
     else:
         routes = payload.get("routes") or []
         if not routes:
@@ -91,17 +96,27 @@ def _parse_payload(
     if not geometry:
         geometry = [[point.lng, point.lat] for point in ordered_points]
 
-    optimized = bool(request.optimize and len(request.intermediates) > 0)
-    note = (
-        "由 OSRM 公共演示服务计算，按预计行驶时间优化途经顺序；公共实例不保证 SLA。"
-        if optimized
-        else "由 OSRM 公共演示服务计算，保持输入顺序；公共实例不保证 SLA。"
-    )
+    optimized = bool(request.optimize and len(points) > 2)
+    if request.end_mode == "open":
+        note = (
+            "由 OSRM 公共演示服务计算：仅固定起点，其余点位顺序和最后一站"
+            "由算法选择；公共实例不保证 SLA。"
+            if optimized
+            else "由 OSRM 公共演示服务计算：保持输入顺序，最后一站为输入中的"
+            "最后一个点位；公共实例不保证 SLA。"
+        )
+    else:
+        note = (
+            "由 OSRM 公共演示服务计算，按预计行驶时间优化途经顺序；公共实例不保证 SLA。"
+            if optimized
+            else "由 OSRM 公共演示服务计算，保持输入顺序；公共实例不保证 SLA。"
+        )
 
     return OptimizeResponse(
         provider="osrm",
         provider_label=PROVIDER_LABEL,
         requested_provider=requested_provider,
+        end_mode=request.end_mode,
         optimized=optimized,
         fallback_reason=fallback_reason,
         note=note,
@@ -125,8 +140,16 @@ async def optimize_osrm(
             "OSRM 公共演示服务仅提供驾车路线；步行/骑行请配置 Google API Key 或选择本地模拟。"
         )
 
-    points = [request.origin, *request.intermediates, request.destination]
-    use_trip = request.optimize and len(request.intermediates) > 0
+    if request.end_mode == "open":
+        if not request.intermediates:
+            raise ProviderRequestError("开放路线模式至少需要一个拜访点。")
+        points = [request.origin, *request.intermediates]
+    else:
+        if request.destination is None:
+            raise ProviderRequestError("固定终点模式需要提供终点。")
+        points = [request.origin, *request.intermediates, request.destination]
+
+    use_trip = request.optimize and len(points) > 2
     service = "trip" if use_trip else "route"
     base_url = settings.OSRM_BASE_URL.rstrip("/")
     url = f"{base_url}/{service}/v1/driving/{_coordinate_string(points)}"
@@ -141,9 +164,10 @@ async def optimize_osrm(
             {
                 "roundtrip": "false",
                 "source": "first",
-                "destination": "last",
             }
         )
+        if request.end_mode == "fixed":
+            params["destination"] = "last"
 
     try:
         async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
@@ -167,4 +191,11 @@ async def optimize_osrm(
         message = payload.get("message") or payload.get("code") or "未知错误"
         raise RouteProviderError(f"OSRM 无法规划路线：{message}")
 
-    return _parse_payload(payload, request, use_trip, requested_provider, fallback_reason)
+    return _parse_payload(
+        payload,
+        request,
+        points,
+        use_trip,
+        requested_provider,
+        fallback_reason,
+    )

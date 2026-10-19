@@ -27,6 +27,7 @@ const FALLBACK_CITIES = [
 
 const state = {
   origin: null,
+  endMode: "open",
   destination: null,
   intermediates: [],
   travelMode: "DRIVE",
@@ -49,11 +50,17 @@ const $ = (selector) => document.querySelector(selector);
 
 const originName = $("#originName");
 const destinationName = $("#destinationName");
+const destinationRow = $("#destinationRow");
 const intermediateList = $("#intermediateList");
 const addStopBtn = $("#addStopBtn");
+const addStopLabel = $("#addStopLabel");
 const stopCount = $("#stopCount");
 const originBtn = $("#originBtn");
 const destinationBtn = $("#destinationBtn");
+const endModeControl = $("#endMode");
+const modeTitle = $("#modeTitle");
+const modeHint = $("#modeHint");
+const optimizeHint = $("#optimizeHint");
 const travelMode = $("#travelMode");
 const optimizeToggle = $("#optimizeToggle");
 const providerSelect = $("#providerSelect");
@@ -70,6 +77,7 @@ const totalDistance = $("#totalDistance");
 const totalDuration = $("#totalDuration");
 const totalStops = $("#totalStops");
 const resultNote = $("#resultNote");
+const resultModeNote = $("#resultModeNote");
 const fallbackNote = $("#fallbackNote");
 const resultStops = $("#resultStops");
 const sourceBadge = $("#sourceBadge");
@@ -252,8 +260,11 @@ function makeIcon(label, kind) {
 }
 
 function renderStops() {
+  const pointLabel = state.endMode === "open" ? "拜访点" : "途经点";
   setStopName(originName, state.origin, "选择起点");
   setStopName(destinationName, state.destination, "选择终点");
+  destinationRow.classList.toggle("hidden", state.endMode === "open");
+  addStopLabel.textContent = `添加${pointLabel}`;
 
   intermediateList.innerHTML = state.intermediates
     .map(
@@ -264,16 +275,16 @@ function renderStops() {
             type="button"
             class="stop-main"
             data-edit-intermediate="${index}"
-            aria-label="编辑途经点 ${index + 1}"
+            aria-label="编辑${pointLabel} ${index + 1}"
           >
-            <span class="stop-label">途经点 ${index + 1}</span>
+            <span class="stop-label">${pointLabel} ${index + 1}</span>
             <span class="stop-name">${escapeHtml(place.name)}</span>
           </button>
           <button
             type="button"
             class="remove-stop"
             data-remove="${index}"
-            aria-label="删除途经点 ${index + 1}"
+            aria-label="删除${pointLabel} ${index + 1}"
           >×</button>
         </div>
       `,
@@ -282,7 +293,7 @@ function renderStops() {
 
   stopCount.textContent = `${state.intermediates.length} / ${MAX_INTERMEDIATES}`;
   addStopBtn.disabled = state.intermediates.length >= MAX_INTERMEDIATES;
-  buttonMeta.textContent = `${state.intermediates.length} 个途经点`;
+  buttonMeta.textContent = `${state.intermediates.length} 个${pointLabel}`;
 }
 
 function renderPreview() {
@@ -414,9 +425,20 @@ function renderResult(data) {
   resultSection.classList.remove("hidden");
   emptyState.classList.add("hidden");
 
-  resultTitle.textContent = data.optimized
-    ? `已优化为 ${data.stops.length} 站顺路行程`
-    : `${data.stops.length} 站行程 · 保持输入顺序`;
+  const openRoute = data.end_mode === "open";
+  if (openRoute) {
+    resultTitle.textContent = data.optimized
+      ? `已规划 ${data.stops.length} 站开放路线`
+      : `${data.stops.length} 站行程 · 保持输入顺序`;
+    resultModeNote.textContent = data.optimized
+      ? "仅固定起点 · 最后一站由算法选择"
+      : "仅固定起点 · 保持输入顺序";
+  } else {
+    resultTitle.textContent = data.optimized
+      ? `已优化为 ${data.stops.length} 站顺路行程`
+      : `${data.stops.length} 站行程 · 保持输入顺序`;
+    resultModeNote.textContent = "起点与终点固定 · 仅优化中间点位";
+  }
   resultProvider.textContent = data.provider_label;
   resultProvider.className = `provider-chip ${data.provider}`;
 
@@ -557,9 +579,19 @@ function extractError(payload) {
 
 async function runOptimize() {
   if (state.busy) return;
-  if (!state.origin || !state.destination) {
-    showToast("请先选择起点和终点。", "error");
-    openPicker(!state.origin ? "origin" : "destination");
+  if (!state.origin) {
+    showToast("请先选择起点。", "error");
+    openPicker("origin");
+    return;
+  }
+  if (state.endMode === "open" && !state.intermediates.length) {
+    showToast("请至少添加一个拜访点。", "error");
+    openPicker("intermediate");
+    return;
+  }
+  if (state.endMode === "fixed" && !state.destination) {
+    showToast("请先选择固定终点。", "error");
+    openPicker("destination");
     return;
   }
 
@@ -569,11 +601,7 @@ async function runOptimize() {
       lat: state.origin.lat,
       lng: state.origin.lng,
     },
-    destination: {
-      name: state.destination.name,
-      lat: state.destination.lat,
-      lng: state.destination.lng,
-    },
+    end_mode: state.endMode,
     intermediates: state.intermediates.map((place) => ({
       name: place.name,
       lat: place.lat,
@@ -583,6 +611,13 @@ async function runOptimize() {
     optimize: state.optimize,
     provider: state.provider,
   };
+  if (state.endMode === "fixed" && state.destination) {
+    payload.destination = {
+      name: state.destination.name,
+      lat: state.destination.lat,
+      lng: state.destination.lng,
+    };
+  }
 
   setBusy(true);
   hideMapStatus();
@@ -606,7 +641,11 @@ async function runOptimize() {
     renderResult(data);
     drawResult(data);
     updateSourceBadgeForResult(data);
-    showMapStatus(`已生成 ${data.stops.length} 个地点的路线`);
+    showMapStatus(
+      data.end_mode === "open"
+        ? `已规划 ${data.stops.length} 个地点的开放路线`
+        : `已生成 ${data.stops.length} 个地点的路线`,
+    );
     if (data.fallback_reason) {
       showToast("实时路线暂不可用，已自动使用本地模拟。");
     }
@@ -661,14 +700,15 @@ async function openPicker(target, intermediateIndex = null) {
     if (city) state.activeCityId = city.id;
   }
 
+  const pointLabel = state.endMode === "open" ? "拜访点" : "途经点";
   pickerTitle.textContent =
     state.editIntermediateIndex !== null
-      ? "编辑途经点"
+      ? `编辑${pointLabel}`
       : target === "origin"
         ? "选择起点"
         : target === "destination"
           ? "选择终点"
-          : "添加途经点";
+          : `添加${pointLabel}`;
 
   lastFocused = document.activeElement;
   overlay.classList.remove("hidden");
@@ -777,17 +817,22 @@ function applyPlace(place, target = state.pickTarget) {
   }
 
   const editIndex = state.editIntermediateIndex;
+  const pointLabel = state.endMode === "open" ? "拜访点" : "途经点";
 
   if (target === "intermediate") {
+    if (state.origin && isSamePlace(state.origin, normalized)) {
+      showToast("该地点与起点相同，请选择其他地点。", "error");
+      return;
+    }
     if (editIndex === null && state.intermediates.length >= MAX_INTERMEDIATES) {
-      showToast(`最多添加 ${MAX_INTERMEDIATES} 个途经点。`, "error");
+      showToast(`最多添加 ${MAX_INTERMEDIATES} 个${pointLabel}。`, "error");
       return;
     }
     const duplicate = state.intermediates.some(
       (item, index) => index !== editIndex && isSamePlace(item, normalized),
     );
     if (duplicate) {
-      showToast("该地点已经在途经点列表中。", "error");
+      showToast(`该地点已经在${pointLabel}列表中。`, "error");
       return;
     }
     if (editIndex !== null) {
@@ -798,6 +843,10 @@ function applyPlace(place, target = state.pickTarget) {
   } else if (target === "origin") {
     state.origin = normalized;
   } else if (target === "destination") {
+    if (state.endMode === "open") {
+      showToast("开放路线模式下没有固定终点。", "error");
+      return;
+    }
     state.destination = normalized;
   }
 
@@ -913,10 +962,18 @@ function loadSample(cityIndex = state.sampleIndex, silent = false) {
   state.sampleIndex = (cityIndex + 1) % cities.length;
   state.activeCityId = city.id;
   state.origin = { ...places[0] };
-  state.destination = { ...places[Math.min(5, places.length - 1)] };
-  state.intermediates = places
-    .slice(1, Math.min(5, places.length - 1))
-    .map((place) => ({ ...place }));
+  if (state.endMode === "open") {
+    state.destination = null;
+    state.intermediates = places
+      .slice(1, Math.min(6, places.length))
+      .map((place) => ({ ...place }));
+  } else {
+    const destinationIndex = Math.min(5, places.length - 1);
+    state.destination = { ...places[destinationIndex] };
+    state.intermediates = places
+      .slice(1, destinationIndex)
+      .map((place) => ({ ...place }));
+  }
   state.result = null;
   state.pickTarget = null;
   state.editIntermediateIndex = null;
@@ -929,8 +986,72 @@ function loadSample(cityIndex = state.sampleIndex, silent = false) {
   }
 }
 
-async function init() {
+function updateOptimizeCopy() {
+  const open = state.endMode === "open";
+  if (!state.optimize) {
+    optimizeHint.textContent = open
+      ? "仅起点固定，保持输入顺序"
+      : "起点和终点固定，保持输入顺序";
+    return;
+  }
+  optimizeHint.textContent = open
+    ? "仅起点固定，其余点位自动排序"
+    : "起点和终点固定，中间点位自动排序";
+}
+
+function renderMode() {
+  const open = state.endMode === "open";
+  modeTitle.textContent = open ? "仅固定起点" : "固定终点";
+  modeHint.textContent = open
+    ? "其余全部点位由算法排序，最后一站自动选择。"
+    : "起点和终点固定，算法只优化中间点位的顺序。";
+  updateOptimizeCopy();
+
+  endModeControl.querySelectorAll("[data-end-mode]").forEach((button) => {
+    const active = button.dataset.endMode === state.endMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
   renderStops();
+}
+
+function setEndMode(mode) {
+  if (mode !== "open" && mode !== "fixed") return;
+  if (mode === state.endMode) return;
+
+  if (mode === "open" && state.destination) {
+    const destination = state.destination;
+    if (state.intermediates.length >= MAX_INTERMEDIATES) {
+      showToast(
+        `最多支持 ${MAX_INTERMEDIATES} 个拜访点，无法将固定终点加入列表。`,
+        "error",
+      );
+      return;
+    }
+    if (
+      !state.intermediates.some((place) => isSamePlace(place, destination))
+    ) {
+      state.intermediates.push({ ...destination });
+    }
+    state.destination = null;
+  } else if (mode === "fixed" && !state.destination) {
+    if (state.intermediates.length) {
+      state.destination = state.intermediates.pop();
+    }
+  }
+
+  state.endMode = mode;
+  renderMode();
+  invalidateResult();
+
+  if (mode === "fixed" && !state.destination) {
+    openPicker("destination");
+  }
+  showToast(mode === "open" ? "已切换为仅固定起点" : "已切换为固定终点");
+}
+
+async function init() {
+  renderMode();
   updateProviderHint();
 
   await Promise.all([loadHealth(), loadPlaces()]);
@@ -992,8 +1113,15 @@ travelMode.addEventListener("click", (event) => {
   invalidateResult();
 });
 
+endModeControl.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-end-mode]");
+  if (!button) return;
+  setEndMode(button.dataset.endMode);
+});
+
 optimizeToggle.addEventListener("change", () => {
   state.optimize = optimizeToggle.checked;
+  updateOptimizeCopy();
   invalidateResult();
 });
 
